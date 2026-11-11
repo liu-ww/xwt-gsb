@@ -1,0 +1,1 @@
+"""Incremental supplier collection ledger."""

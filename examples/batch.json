@@ -1,0 +1,4 @@
+[
+  {"seq":1,"event_id":"plan-1","entity":"plan","key":"basic-plan","rev":1,"value":{"customer":"c1","start":0,"end":null,"segment":"basic","discount_bps":1000,"priority":0}},
+  {"seq":2,"event_id":"order-1","entity":"order","key":"o1","rev":1,"value":{"customer":"c1","at":0,"gross_cents":100}}
+]
