@@ -1,6 +1,6 @@
 import argparse
 import json
-from .store import Ledger
+from .store import Invalid, Ledger
 
 
 def main():
@@ -23,7 +23,11 @@ def main():
         elif args.command == 'ingest':
             with open(args.json_file,encoding='utf-8') as source:
                 rows = json.load(source)
-            result = ledger.ingest(args.partition,args.owner,int(args.epoch),rows)
+            try:
+                epoch = int(args.epoch)
+            except ValueError:
+                raise Invalid('epoch must be an integer')
+            result = ledger.ingest(args.partition,args.owner,epoch,rows)
         elif args.command == 'export':
             result = {'appended':ledger.export(args.output)}
         else:
