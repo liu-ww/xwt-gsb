@@ -5,14 +5,33 @@ import sys
 from .pipeline import Warehouse
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def _emit_error(exc, code):
+    print(json.dumps({'error': type(exc).__name__, 'message': str(exc)},
+                     ensure_ascii=False, sort_keys=True,
+                     separators=(',', ':')))
+    return code
+
+
 def main():
-    parser = argparse.ArgumentParser()
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        pass
+    parser = _ArgumentParser()
     parser.add_argument('--warehouse', required=True)
     sub = parser.add_subparsers(dest='command', required=True)
     one = sub.add_parser('apply'); one.add_argument('batch')
     many = sub.add_parser('apply-many'); many.add_argument('batches', nargs='+')
     sub.add_parser('query')
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except ValueError as exc:
+        return _emit_error(exc, 2)
     warehouse = None
     try:
         warehouse = Warehouse(args.warehouse)
@@ -22,12 +41,12 @@ def main():
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
         return 0
     except (ValueError, KeyError, OSError) as exc:
-        print(json.dumps({'error': type(exc).__name__, 'message': str(exc)}, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
-        return 2
+        return _emit_error(exc, 2)
+    except Exception as exc:
+        return _emit_error(exc, 1)
     finally:
         if warehouse is not None: warehouse.close()
 
 
 if __name__ == '__main__':
     raise SystemExit(main())
-
