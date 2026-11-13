@@ -1,0 +1,18 @@
+{
+  "input_digest": "89230f48acfbd5b5ce98a609f66f1a77597e3763d121cbe7fe054bd8bcb09acc",
+  "rules": [
+    {
+      "checked": 2,
+      "digest": "821c74132fd246fdff87ba142dca8f6b5b9635ec3cd8c5b0b662dfee37737d92",
+      "id": "nn",
+      "status": "fail",
+      "violation_keys": [
+        "2"
+      ],
+      "violations": 1
+    }
+  ],
+  "run_id": "cli1",
+  "status": "failed",
+  "version": 1
+}

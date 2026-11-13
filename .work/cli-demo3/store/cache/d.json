@@ -1,0 +1,1 @@
+{"content_hash": "5d3c8af4a4f92ee46ba9734d4e0c0be21b9d956b27e084226bd3dd72d5047cde", "header": ["id", "name"], "primary_key": "id", "records": [{"id": 1, "name": "A"}, {"id": 2, "name": null}], "schema": {"id": "int", "name": "string"}, "version": 1}

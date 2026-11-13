@@ -1,0 +1,24 @@
+{
+  "datasets": {
+    "d": {
+      "schema": {
+        "name": "string",
+        "id": "int"
+      },
+      "path": "n.csv",
+      "primary_key": "id"
+    }
+  },
+  "rules": [
+    {
+      "column": "name",
+      "id": "nn",
+      "depends_on": [],
+      "severity": "error",
+      "params": {},
+      "dataset": "d",
+      "type": "not_null"
+    }
+  ],
+  "run_id": "cli1"
+}

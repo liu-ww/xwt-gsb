@@ -1,0 +1,3 @@
+id,name,age,score,active,dept_id
+1,Ada,30,1.5,true,10
+5,Eve,17,0.0,1,

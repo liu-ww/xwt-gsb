@@ -1,0 +1,13 @@
+{
+  "input_digest": "1239895458f2b42920abcdc102760e1f36214fb18e2e0b85e887b86fecbb8e22",
+  "quarantine": {
+    "emp.jsonl": {
+      "digest": "e12d4d89b486a9f6e3519d4a82b4fa11bafc99b61e19c96916f7cbbdcab90cc0",
+      "rows": 1
+    }
+  },
+  "run_id": "r",
+  "summary": "summary-fe95f8548e9b1090.json",
+  "summary_digest": "fe95f8548e9b1090a7b64f4fa566f953cbd3b87d074b119e766cad7b8ac44a50",
+  "version": 1
+}
