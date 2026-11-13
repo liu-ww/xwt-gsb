@@ -1,0 +1,116 @@
+import json
+import uuid
+import shutil
+from pathlib import Path
+
+from backfillloom import Scheduler, PlanError, LeaseError, FaultInjected
+
+
+def td():
+    p = Path(".work") / ("e-" + uuid.uuid4().hex)
+    p.mkdir(parents=True)
+    return p
+
+
+def make(parts, tasks, pid="p"):
+    return {"plan_id": pid, "partitions": list(parts), "tasks": tasks}
+
+
+def t(name, deps=(), n=2, fan="same_partition"):
+    return dict(name=name, depends_on=list(deps), max_attempts=n,
+                fan_in=fan, command_digest=name)
+
+
+# restart + valid lease
+d = td(); db = d / "x.sqlite"
+s = Scheduler(db)
+s.load(make(("2024-01-01",), [t("a")]))
+c = s.claim("w1", 0, 10)[0]
+s.close()
+s = Scheduler(db)
+assert s.claim("w2", 5, 10) == []
+assert s.status()["running"] == 1
+assert s.complete(c["instance"], c["lease_token"], "d", 5)["status"] == "success"
+s.close(); shutil.rmtree(d)
+
+# partition priority before layer/name
+d = td(); db = d / "x.sqlite"
+s = Scheduler(db)
+s.load(make(("2024-01-01", "2024-01-02"), [t("a")]))
+got = s.claim("w", 0, 10, 1)
+assert got[0]["instance"] == "a@2024-01-01"
+s.close(); shutil.rmtree(d)
+
+# layer priority
+d = td(); db = d / "x.sqlite"
+s = Scheduler(db)
+s.load(make(("2024-01-01",), [t("z"), t("r"), t("a", ["r"])]))
+c = s.claim("w", 0, 10, 1)[0]
+assert c["instance"] == "r@2024-01-01"
+s.complete(c["instance"], c["lease_token"], "r", 0)
+# z (layer 0) must beat a (layer 1), even though a sorts first by name
+c = s.claim("w", 0, 10, 1)[0]
+assert c["instance"] == "z@2024-01-01", c
+s.close(); shutil.rmtree(d)
+
+# extend after failure blocks only newly added descendants
+d = td(); db = d / "x.sqlite"
+tasks = [t("a", n=1), t("b", ["a"], fan="all_previous")]
+s = Scheduler(db)
+s.load(make(("2024-01-01",), tasks))
+c = s.claim("w", 0, 10, 1)[0]
+s.claim("w2", 10, 10, 1)  # expiry at final attempt -> a failed
+old = s.status()
+assert old["failed"] == 1 and old["blocked"] == 1
+ext = s.extend(make(("2024-01-01", "2024-01-02"), tasks))
+assert ext["added"] == 2
+st = s.status()
+assert st["failed"] == 1 and st["blocked"] == 2 and st["pending"] == 1, st
+old_rows = {r["instance"]: r for r in old["instances"]}
+new_rows = {r["instance"]: r for r in st["instances"]}
+for iid, row in old_rows.items():
+    assert new_rows[iid] == row
+s.close(); shutil.rmtree(d)
+
+# complete/fail/extend fault rollback
+d = td(); db = d / "x.sqlite"
+s = Scheduler(db)
+s.load(make(("2024-01-01",), [t("a")]))
+c = s.claim("w", 0, 10)[0]
+try:
+    s.complete(c["instance"], c["lease_token"], "d", 0, fault="before_commit")
+except FaultInjected:
+    pass
+else:
+    raise AssertionError("complete fault")
+assert s.status()["running"] == 1
+assert s.complete(c["instance"], c["lease_token"], "d", 0)["status"] == "success"
+s2tasks = [t("a")]
+try:
+    s.extend(make(("2024-01-01", "2024-01-02"), s2tasks), fault="before_commit")
+except FaultInjected:
+    pass
+else:
+    raise AssertionError("extend fault")
+assert s.status()["success"] == 1
+assert "a@2024-01-02" not in [r["instance"] for r in s.status()["instances"]]
+s.close(); shutil.rmtree(d)
+
+# load cannot change bound content; equal content is accepted
+d = td(); db = d / "x.sqlite"
+s = Scheduler(db)
+s.load(make(("2024-01-01",), [t("a")]))
+s.close()
+s = Scheduler(db)
+s.load(make(("2024-01-01",), [t("a")]))
+s.close()
+s = Scheduler(db)
+try:
+    s.load(make(("2024-01-02",), [t("a")]))
+except PlanError:
+    pass
+else:
+    raise AssertionError("changed load accepted")
+s.close(); shutil.rmtree(d)
+
+print("EXTRA CHECKS PASSED")

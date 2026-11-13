@@ -1,0 +1,10 @@
+*** Begin Patch
+*** Update File: backfillloom/scheduler.py
+@@
+-        return {"counts": counts, "instances": details}
++        result = {"counts": counts, "instances": details}
++        # Keep direct ``status()['success']`` access convenient as well.
++        for state, count in counts.items():
++            result[state] = count
++        return result
+*** End Patch

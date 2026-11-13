@@ -1,0 +1,226 @@
+import json
+import sqlite3
+import tempfile
+import threading
+from pathlib import Path
+
+from backfillloom import Scheduler
+from backfillloom.scheduler import LeaseError, PlanError, FaultInjected, SCHEMA_VERSION
+import contextlib, uuid, shutil
+@contextlib.contextmanager
+def _td():
+    p = Path('.work') / ('v-' + uuid.uuid4().hex)
+    p.mkdir(parents=True)
+    try:
+        yield str(p)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def plan(partitions=("2024-01-01",), tasks=None, plan_id="p"):
+    if tasks is None:
+        tasks = [dict(name="a", depends_on=[], max_attempts=2,
+                      fan_in="same_partition", command_digest="a")]
+    return {"plan_id": plan_id, "partitions": list(partitions), "tasks": tasks}
+
+
+def task(name, deps=(), max_attempts=2, fan_in="same_partition"):
+    return dict(name=name, depends_on=list(deps), max_attempts=max_attempts,
+                fan_in=fan_in, command_digest=name)
+
+
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    s = Scheduler(db)
+    s.load(plan())
+    c = s.claim("w1", 0, 10)[0]
+    assert c["attempt"] == 1 and c["instance"] == "a@2024-01-01"
+    assert s.claim("w2", 5, 10) == []
+    assert s.status()["counts"]["running"] == 1
+    try:
+        s.complete(c["instance"], c["lease_token"], "out1", 5)
+    except LeaseError:
+        raise AssertionError("complete should work")
+    assert s.status()["counts"]["success"] == 1
+    assert s.complete(c["instance"], c["lease_token"], "out1", 5)["status"] == "success"
+    for tok, dig in ((c["lease_token"], "out2"), ("other", "out1")):
+        try:
+            s.complete(c["instance"], tok, dig, 5)
+        except LeaseError:
+            pass
+        else:
+            raise AssertionError("rejected completion expected")
+    s.close()
+
+    # Restart recovery: success, digest, version persist.
+    s = Scheduler(db)
+    st = s.status()
+    assert st["counts"]["success"] == 1
+    assert st["instances"][0]["output_digest"] == "out1"
+    raw = sqlite3.connect(db)
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    raw.close()
+    s.close()
+
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    tasks = [task("z", max_attempts=2), task("a", max_attempts=2)]
+    s = Scheduler(db)
+    s.load(plan(("2024-01-01",), tasks))
+    # deterministic same-layer task-name order
+    got = s.claim("w", 0, 5, limit=2)
+    assert [x["instance"] for x in got] == ["a@2024-01-01", "z@2024-01-01"]
+    s.close()
+
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    tasks = [task("a", max_attempts=1), task("b", ["a"], fan_in="all_previous")]
+    s = Scheduler(db)
+    s.load(plan(("2024-01-01", "2024-01-02"), tasks))
+    c = s.claim("w", 0, 10, limit=1)[0]
+    assert c["instance"] == "a@2024-01-01"
+    # expire final attempt -> failed and both b instances blocked
+    retry = s.claim("w2", 10, 10, limit=10)
+    assert [x["instance"] for x in retry] == ["a@2024-01-02"], retry
+    st = s.status()
+    assert st["counts"]["failed"] == 1, st
+    assert st["counts"]["blocked"] == 2, st
+    assert "a@2024-01-01" == [r["instance"] for r in st["instances"] if r["state"] == "failed"][0]
+    s.close()
+
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    tasks = [task("a", max_attempts=2), task("b", ["a"])]
+    s = Scheduler(db)
+    s.load(plan(("2024-01-01",), tasks))
+    c = s.claim("w", 0, 10, limit=1)[0]
+    f = s.fail(c["instance"], c["lease_token"], "boom", 1)
+    assert f["status"] == "pending" and f["attempt"] == 1
+    c2 = s.claim("w", 1, 10, limit=1)[0]
+    assert c2["attempt"] == 2 and c2["instance"] == c["instance"]
+    f2 = s.fail(c2["instance"], c2["lease_token"], "boom", 2)
+    assert f2["status"] == "failed"
+    st = s.status()
+    assert st["counts"]["failed"] == 1 and st["counts"]["blocked"] == 1
+    s.close()
+
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    tasks = [task("a", max_attempts=2), task("b", ["a"], fan_in="all_previous")]
+    s = Scheduler(db)
+    s.load(plan(("2024-01-01", "2024-01-02"), tasks))
+    a1 = s.claim("w", 0, 10, limit=1)[0]
+    s.complete(a1["instance"], a1["lease_token"], "d1", 0)
+    # b@01 still needs b@02's a-parent? No: b@01 depends on a@01 only.
+    got = s.claim("w", 0, 10, limit=1)[0]
+    assert got["instance"] == "b@2024-01-01", got
+    s.complete(got["instance"], got["lease_token"], "b1", 0)
+    # a@02 now ready, then b@02 only after a@02 success.
+    got = s.claim("w", 0, 10, limit=2)
+    assert [x["instance"] for x in got] == ["a@2024-01-02"], got
+    s.complete(got[0]["instance"], got[0]["lease_token"], "d2", 0)
+    got = s.claim("w", 0, 10, limit=1)[0]
+    assert got["instance"] == "b@2024-01-02"
+    s.close()
+
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    tasks = [task("a", max_attempts=2)]
+    s = Scheduler(db)
+    s.load(plan(("2024-01-01",), tasks))
+    c = s.claim("w", 0, 10)[0]
+    s.complete(c["instance"], c["lease_token"], "d", 0)
+    before = s.status()
+    ext = dict(plan(("2024-01-01", "2024-01-02"), tasks))
+    assert s.extend(ext)["added"] == 1
+    after = s.status()
+    old = [r for r in after["instances"] if r["instance"] == c["instance"]][0]
+    assert old["state"] == "success" and old["output_digest"] == "d"
+    assert before["instances"][0]["attempt"] == old["attempt"]
+    try:
+        s.extend(plan(("2024-01-01", "2024-01-03"), [task("a", max_attempts=3)]))
+    except PlanError:
+        pass
+    else:
+        raise AssertionError("task change must reject")
+    try:
+        s.extend(plan(("2024-01-01",), tasks))
+    except PlanError:
+        pass
+    else:
+        raise AssertionError("shrinking must reject")
+    s.close()
+
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    s = Scheduler(db)
+    s.load(plan(("2024-01-01",)))
+    try:
+        s.claim("w", 0, 10, fault="after_lease")
+    except FaultInjected:
+        pass
+    else:
+        raise AssertionError("fault expected")
+    st = s.status()
+    assert st["counts"]["pending"] == 1 and st["counts"]["running"] == 0
+    try:
+        s.claim("w", 0, 10, fault="before_commit")
+    except FaultInjected:
+        pass
+    st = s.status()
+    assert st["counts"]["pending"] == 1
+    c = s.claim("w", 0, 10)[0]
+    assert c["attempt"] == 1
+    s.close()
+
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    s = Scheduler(db)
+    s.load(plan())
+    results = []
+    barrier = threading.Barrier(8)
+
+    def worker(i):
+        x = Scheduler(db)
+        barrier.wait()
+        results.append(x.claim(f"w{i}", 0, 10, 1))
+        x.close()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    wins = [r for r in results if r]
+    assert len(wins) == 1 and wins[0][0]["attempt"] == 1, results
+    s.close()
+
+# validation + future schema
+with _td() as td:
+    db = Path(td) / "x.sqlite"
+    raw = sqlite3.connect(db)
+    raw.execute("PRAGMA user_version = 3")
+    raw.commit()
+    raw.close()
+    try:
+        Scheduler(db)
+    except PlanError:
+        pass
+    else:
+        raise AssertionError("future schema must reject")
+
+for bad in (
+    {"plan_id": "p", "partitions": [], "tasks": [], "extra": 1},
+    plan(("2024-01-02", "2024-01-01")),
+    plan(("2024-02-30",)),
+    plan(tasks=[task("a", ["b"]), task("b", ["a"])]),
+):
+    try:
+        with _td() as td:
+            Scheduler(Path(td) / "x.sqlite").load(bad)
+    except PlanError:
+        pass
+    else:
+        raise AssertionError(f"invalid plan accepted: {bad}")
+
+print("ALL VERIFICATION CHECKS PASSED")

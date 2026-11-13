@@ -1,0 +1,14 @@
+*** Begin Patch
+*** Update File: backfillloom/scheduler.py
+@@
+                 existing = self._stored_plan(row)
+                 if row["canonical"] == canonical:
+                     effective = existing
++                    self._insert_instances(effective, effective["partitions"])
+                 else:
+-                    effective, _added = self._apply_extension(existing, checked)
++                    raise PlanError(
++                        "plan_id is permanently bound to different plan content; "
++                        "later partitions must be added with extend(plan)"
++                    )
+*** End Patch

@@ -1,0 +1,10 @@
+*** Begin Patch
+*** Update File: backfillloom/__main__.py
+@@
+-from .scheduler import Scheduler
++try:
++    from .scheduler import Scheduler
++except ImportError:  # direct ``python backfillloom/__main__.py`` execution
++    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++    from backfillloom.scheduler import Scheduler
+*** End Patch

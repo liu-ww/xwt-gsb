@@ -1,0 +1,7 @@
+*** Begin Patch
+*** Update File: .work/verify.py
+@@
+-    assert s.claim("w2", 10, 10, limit=10) == []
++    retry = s.claim("w2", 10, 10, limit=10)
++    assert [x["instance"] for x in retry] == ["a@2024-01-02"], retry
+*** End Patch

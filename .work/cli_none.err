@@ -1,0 +1,3 @@
+usage: backfillloom [-h] [--db DB]
+                    {load,extend,claim,complete,fail,status} ...
+backfillloom: error: the following arguments are required: command

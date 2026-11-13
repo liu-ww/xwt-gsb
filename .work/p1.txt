@@ -1,0 +1,10 @@
+*** Begin Patch
+*** Update File: backfillloom/scheduler.py
+@@
+                 if (
+                     row["success_token"] == lease_token
+                     and row["output_digest"] == output_digest
+                 ):
++                    _inject_fault(fault)
+                     return {
+*** End Patch

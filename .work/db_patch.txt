@@ -1,0 +1,12 @@
+*** Begin Patch
+*** Update File: backfillloom/__main__.py
+@@
+ def _add_common(parser):
+-    parser.add_argument("--db", help="SQLite database path")
++    parser.add_argument(
++        "--db", default=argparse.SUPPRESS, help="SQLite database path"
++    )
+@@
+-        db = args.db
++        db = getattr(args, "db", None)
+*** End Patch

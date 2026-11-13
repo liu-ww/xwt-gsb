@@ -1,0 +1,30 @@
+*** Begin Patch
+*** Add File: .work/proc_runner.py
++import json
++import sys
++import time
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT))
++from backfillloom import Scheduler
++
++
++def plan():
++    return {
++        "plan_id": "proc",
++        "partitions": ["2024-01-01"],
++        "tasks": [dict(name="a", depends_on=[], max_attempts=2,
++                       fan_in="same_partition", command_digest="a")],
++    }
++
++
++db, start, out, index = sys.argv[1:]
++s = Scheduler(db)
++s.load(plan())
++while not Path(start).exists():
++    time.sleep(0.001)
++result = s.claim(f"w{index}", 0, 10, 1)
++Path(out).write_text(json.dumps(result), encoding="utf-8")
++s.close()
+*** End Patch

@@ -1,0 +1,59 @@
+import json
+import multiprocessing as mp
+import sys
+import uuid
+import shutil
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from backfillloom import Scheduler
+
+
+def plan():
+    return {
+        "plan_id": "proc",
+        "partitions": ["2024-01-01"],
+        "tasks": [dict(name="a", depends_on=[], max_attempts=2,
+                       fan_in="same_partition", command_digest="a")],
+    }
+
+
+def worker(db, index, barrier, queue):
+    from backfillloom import Scheduler as S
+    s = S(db)
+    s.load(plan())
+    barrier.wait()
+    result = s.claim(f"w{index}", 0, 10, 1)
+    queue.put(result)
+    s.close()
+
+
+if __name__ == "__main__":
+    d = Path(".work") / ("proc-" + uuid.uuid4().hex)
+    d.mkdir(parents=True)
+    db = str(d / "x.sqlite")
+    s = Scheduler(db)
+    s.load(plan())
+    s.close()
+    ctx = mp.get_context("spawn")
+    n = 6
+    barrier = ctx.Barrier(n)
+    queue = ctx.Queue()
+    ps = [ctx.Process(target=worker, args=(db, i, barrier, queue)) for i in range(n)]
+    for p in ps:
+        p.start()
+    results = [queue.get(timeout=30) for _ in range(n)]
+    for p in ps:
+        p.join(timeout=30)
+        assert p.exitcode == 0
+    wins = [r for r in results if r]
+    assert len(wins) == 1 and wins[0][0]["attempt"] == 1, results
+    tokens = [wins[0][0]["lease_token"]]
+    assert len(set(tokens)) == 1
+    s = Scheduler(db)
+    st = s.status()
+    assert st["running"] == 1 and st["instances"][0]["attempt"] == 1, st
+    s.close()
+    shutil.rmtree(d)
+    print("PROCESS CONCURRENCY PASSED")

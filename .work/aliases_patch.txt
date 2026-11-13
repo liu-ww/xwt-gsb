@@ -1,0 +1,36 @@
+*** Begin Patch
+*** Update File: backfillloom/__main__.py
+@@
+-    load.add_argument("--plan", dest="plan_opt")
++    load.add_argument("--plan", "--plan-file", dest="plan_opt")
+@@
+-    extend.add_argument("--plan", dest="plan_opt")
++    extend.add_argument("--plan", "--plan-file", dest="plan_opt")
+@@
+     claim.add_argument(
+-        "--lease-seconds", "--lease_seconds", dest="lease_seconds",
++        "--lease-seconds", "--lease_seconds", "--lease", dest="lease_seconds",
+         type=float, default=300.0,
+     )
+@@
+     complete.add_argument(
+-        "--lease-token", "--lease_token", dest="lease_token", required=True
++        "--lease-token", "--lease_token", "--token",
++        dest="lease_token", required=True
+     )
+     complete.add_argument(
+-        "--output-digest", "--output_digest", dest="output_digest", required=True
++        "--output-digest", "--output_digest", "--digest",
++        dest="output_digest", required=True
+     )
+@@
+     fail.add_argument(
+-        "--lease-token", "--lease_token", dest="lease_token", required=True
++        "--lease-token", "--lease_token", "--token",
++        dest="lease_token", required=True
+     )
+-    fail.add_argument("--error", required=True)
++    fail.add_argument(
++        "--error", "--error-category", "--error_category", required=True
++    )
+*** End Patch

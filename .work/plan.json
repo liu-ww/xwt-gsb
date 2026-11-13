@@ -1,0 +1,1 @@
+{"plan_id": "cli", "partitions": ["2024-01-01"], "tasks": [{"name": "a", "depends_on": [], "max_attempts": 2, "fan_in": "same_partition", "command_digest": "x"}]}

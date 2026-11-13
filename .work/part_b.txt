@@ -1,0 +1,465 @@
++
++    def _max_attempts(self, plan):
++        return {task["name"]: task["max_attempts"] for task in plan["tasks"]}
++
++    def _insert_instances(self, plan, partitions):
++        added = set()
++        for partition in partitions:
++            for task in plan["tasks"]:
++                instance = _instance(task["name"], partition)
++                cursor = self.db.execute(
++                    "INSERT OR IGNORE INTO instances "
++                    "(plan_id, instance, task, partition, state, attempt) "
++                    "VALUES (?, ?, ?, ?, ?, 0)",
++                    (plan["plan_id"], instance, task["name"], partition, PENDING),
++                )
++                if cursor.rowcount:
++                    added.add(instance)
++        return added
++
++    def _tail(self, old_partitions, new_partitions):
++        if not old_partitions:
++            return list(new_partitions)
++        if new_partitions == old_partitions:
++            return []
++        if (
++            len(new_partitions) > len(old_partitions)
++            and new_partitions[:len(old_partitions)] == old_partitions
++        ):
++            tail = list(new_partitions[len(old_partitions):])
++        else:
++            maximum = old_partitions[-1]
++            if not new_partitions or any(p <= maximum for p in new_partitions):
++                return None
++            tail = list(new_partitions)
++        maximum = old_partitions[-1]
++        if any(p <= maximum for p in tail):
++            return None
++        return tail
++
++    def _apply_extension(self, existing, submitted):
++        if existing["plan_id"] != submitted["plan_id"]:
++            raise PlanError("extend must keep the same plan_id")
++        if _task_signature(existing["tasks"]) != _task_signature(submitted["tasks"]):
++            raise PlanError("extend may not change task definitions")
++        tail = self._tail(existing["partitions"], submitted["partitions"])
++        if tail is None:
++            raise PlanError(
++                "extend may only append partitions later than the current maximum"
++            )
++        effective = {
++            "plan_id": existing["plan_id"],
++            "partitions": existing["partitions"] + tail,
++            "tasks": submitted["tasks"],
++        }
++        added = self._insert_instances(effective, tail)
++        self.db.execute(
++            "UPDATE plans SET canonical=?, tasks_json=?, partitions_json=?, "
++            "max_partition=?, updated_at=? WHERE plan_id=?",
++            (
++                _canonical_plan(effective),
++                _task_signature(effective["tasks"]),
++                json.dumps(effective["partitions"], separators=(",", ":")),
++                effective["partitions"][-1] if effective["partitions"] else None,
++                time.time(),
++                effective["plan_id"],
++            ),
++        )
++        self._propagate(effective, only=added)
++        return effective, added
++
++    def _propagate(self, plan, only=None):
++        rows = self.db.execute(
++            "SELECT instance, state FROM instances WHERE plan_id=?",
++            (plan["plan_id"],),
++        ).fetchall()
++        states = {row["instance"]: row["state"] for row in rows}
++        edges = _edges(plan)
++        blocked = set()
++        changed = True
++        while changed:
++            changed = False
++            for parent, child in edges:
++                if only is not None and child not in only:
++                    continue
++                if states.get(parent) not in (FAILED, BLOCKED):
++                    continue
++                if states.get(child) not in (SUCCESS, FAILED, BLOCKED):
++                    states[child] = BLOCKED
++                    blocked.add(child)
++                    changed = True
++        for instance in blocked:
++            self.db.execute(
++                "UPDATE instances SET state=?, lease_token=NULL, "
++                "lease_worker=NULL, lease_until=NULL, error=NULL "
++                "WHERE plan_id=? AND instance=?",
++                (BLOCKED, plan["plan_id"], instance),
++            )
++        return blocked
++
++    # --------------------------------------------------------------
++    # protocol API
++    # --------------------------------------------------------------
++    def load(self, plan, fault=None):
++        checked = _validate_plan(plan)
++        canonical = _canonical_plan(checked)
++        with self._tx():
++            row = self.db.execute(
++                "SELECT * FROM plans WHERE plan_id=?", (checked["plan_id"],)
++            ).fetchone()
++            if row is None:
++                self.db.execute(
++                    "INSERT INTO plans "
++                    "(plan_id, canonical, tasks_json, partitions_json, "
++                    "max_partition, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
++                    (
++                        checked["plan_id"],
++                        canonical,
++                        _task_signature(checked["tasks"]),
++                        json.dumps(checked["partitions"], separators=(",", ":")),
++                        checked["partitions"][-1] if checked["partitions"] else None,
++                        time.time(),
++                    ),
++                )
++                self._insert_instances(checked, checked["partitions"])
++                effective = checked
++            else:
++                existing = self._stored_plan(row)
++                if row["canonical"] == canonical:
++                    effective = existing
++                else:
++                    effective, _added = self._apply_extension(existing, checked)
++            self._set_active(effective["plan_id"])
++            _inject_fault(fault)
++            self.plan = effective
++            self.plan_id = effective["plan_id"]
++            total = self.db.execute(
++                "SELECT COUNT(*) FROM instances WHERE plan_id=?",
++                (effective["plan_id"],),
++            ).fetchone()[0]
++        return {"instances": int(total)}
++
++    def extend(self, plan, fault=None):
++        checked = _validate_plan(plan)
++        self._ensure_active()
++        with self._tx():
++            plan_id = self.plan_id
++            row = self.db.execute(
++                "SELECT * FROM plans WHERE plan_id=?", (plan_id,)
++            ).fetchone()
++            if row is None:
++                raise PlanError("active plan is no longer stored")
++            if checked["plan_id"] != plan_id:
++                raise PlanError("extend must keep the same plan_id")
++            existing = self._stored_plan(row)
++            effective, added = self._apply_extension(existing, checked)
++            self._set_active(plan_id)
++            _inject_fault(fault)
++            self.plan = effective
++            self.plan_id = plan_id
++            total = self.db.execute(
++                "SELECT COUNT(*) FROM instances WHERE plan_id=?", (plan_id,)
++            ).fetchone()[0]
++        return {"instances": int(total), "added": len(added)}
++
++    def claim(self, worker, now, lease_seconds, limit=1, fault=None):
++        if not isinstance(worker, str) or not worker:
++            raise LeaseError("worker must be a non-empty string")
++        now_value = _number(now, "now")
++        lease_value = _number(lease_seconds, "lease_seconds")
++        if lease_value < 0:
++            raise LeaseError("lease_seconds must not be negative")
++        if not _is_int(limit) or limit < 0:
++            raise LeaseError("limit must be a non-negative integer")
++        if fault is not None and fault not in _FAULT_PHASES:
++            raise LeaseError(f"unknown fault phase: {fault}")
++
++        plan = self._ensure_active()
++        maximums = self._max_attempts(plan)
++        out = []
++        with self._tx():
++            rows = self.db.execute(
++                "SELECT * FROM instances WHERE plan_id=?", (plan["plan_id"],)
++            ).fetchall()
++            expired_failures = set()
++            for row in rows:
++                if (
++                    row["state"] == RUNNING
++                    and row["lease_until"] is not None
++                    and now_value >= float(row["lease_until"])
++                ):
++                    if int(row["attempt"]) >= maximums.get(row["task"], 1):
++                        expired_failures.add(row["instance"])
++                    else:
++                        self.db.execute(
++                            "UPDATE instances SET state=?, lease_token=NULL, "
++                            "lease_worker=NULL, lease_until=NULL "
++                            "WHERE plan_id=? AND instance=?",
++                            (PENDING, plan["plan_id"], row["instance"]),
++                        )
++            for instance in expired_failures:
++                self.db.execute(
++                    "UPDATE instances SET state=?, lease_token=NULL, "
++                    "lease_worker=NULL, lease_until=NULL, error=? "
++                    "WHERE plan_id=? AND instance=?",
++                    (FAILED, "lease_expired", plan["plan_id"], instance),
++                )
++            if expired_failures:
++                self._propagate(plan)
++
++            if limit:
++                rows = self.db.execute(
++                    "SELECT * FROM instances WHERE plan_id=?", (plan["plan_id"],)
++                ).fetchall()
++                states = {row["instance"]: row["state"] for row in rows}
++                attempts = {row["instance"]: int(row["attempt"]) for row in rows}
++                layers = _layers(plan["tasks"])
++                partitions = plan["partitions"]
++                indexes = {part: index for index, part in enumerate(partitions)}
++                tasks = {task["name"]: task for task in plan["tasks"]}
++
++                ready = []
++                for row in rows:
++                    instance = row["instance"]
++                    if states[instance] != PENDING:
++                        continue
++                    task = tasks.get(row["task"])
++                    if task is None:
++                        continue
++                    partition = row["partition"]
++                    index = indexes[partition]
++                    ok = True
++                    for dependency in task["depends_on"]:
++                        if states.get(_instance(dependency, partition)) != SUCCESS:
++                            ok = False
++                            break
++                        if task["fan_in"] == "all_previous":
++                            for earlier in partitions[:index]:
++                                if states.get(_instance(dependency, earlier)) != SUCCESS:
++                                    ok = False
++                                    break
++                        if not ok:
++                            break
++                    if ok:
++                        ready.append(instance)
++
++                ready.sort(key=lambda inst: (
++                    _partition_of(inst, tasks),
++                    layers[_task_of(inst, tasks)],
++                    _task_of(inst, tasks),
++                    inst,
++                ))
++
++                granted = 0
++                for instance in ready:
++                    if granted >= limit:
++                        break
++                    row = self.db.execute(
++                        "SELECT * FROM instances WHERE plan_id=? AND instance=?",
++                        (plan["plan_id"], instance),
++                    ).fetchone()
++                    if row is None or row["state"] != PENDING:
++                        continue
++                    attempt = int(row["attempt"]) + 1
++                    maximum = maximums.get(row["task"], 1)
++                    if attempt > maximum:
++                        self.db.execute(
++                            "UPDATE instances SET state=?, lease_token=NULL, "
++                            "lease_worker=NULL, lease_until=NULL, error=? "
++                            "WHERE plan_id=? AND instance=?",
++                            (FAILED, "attempts_exhausted", plan["plan_id"], instance),
++                        )
++                        self._propagate(plan)
++                        continue
++                    token = self._new_token()
++                    self.db.execute(
++                        "UPDATE instances SET state=?, attempt=?, lease_token=?, "
++                        "lease_worker=?, lease_until=? "
++                        "WHERE plan_id=? AND instance=?",
++                        (
++                            RUNNING, attempt, token, worker,
++                            now_value + lease_value, plan["plan_id"], instance,
++                        ),
++                    )
++                    out.append({
++                        "instance": instance,
++                        "task": row["task"],
++                        "partition": row["partition"],
++                        "attempt": attempt,
++                        "lease_token": token,
++                    })
++                    granted += 1
++
++            _inject_fault(fault, "after_lease")
++            _inject_fault(fault, "before_commit")
++        return out
++
++    def _new_token(self):
++        while True:
++            token = secrets.token_hex(32)
++            found = self.db.execute(
++                "SELECT 1 FROM instances WHERE lease_token=? OR success_token=? LIMIT 1",
++                (token, token),
++            ).fetchone()
++            if found is None:
++                return token
++
++    def complete(
++        self, instance, lease_token, output_digest, now, fault=None
++    ):
++        if not isinstance(instance, str) or not instance:
++            raise LeaseError("instance must be a non-empty string")
++        if not isinstance(lease_token, str) or not lease_token:
++            raise LeaseError("lease_token must be a non-empty string")
++        if not isinstance(output_digest, str):
++            raise LeaseError("output_digest must be a string")
++        now_value = _number(now, "now")
++        if fault is not None and fault not in _FAULT_PHASES:
++            raise LeaseError(f"unknown fault phase: {fault}")
++
++        plan = self._ensure_active()
++        with self._tx():
++            row = self.db.execute(
++                "SELECT * FROM instances WHERE plan_id=? AND instance=?",
++                (plan["plan_id"], instance),
++            ).fetchone()
++            if row is None:
++                raise LeaseError(f"unknown instance: {instance}")
++            if row["state"] == SUCCESS:
++                if (
++                    row["success_token"] == lease_token
++                    and row["output_digest"] == output_digest
++                ):
++                    return {
++                        "instance": instance,
++                        "status": SUCCESS,
++                        "attempt": int(row["attempt"]),
++                        "output_digest": row["output_digest"],
++                    }
++                raise LeaseError(
++                    "success output is already bound; stale token or different digest"
++                )
++            if row["state"] != RUNNING:
++                raise LeaseError(f"instance {instance} is not running")
++            if row["lease_token"] != lease_token:
++                raise LeaseError("lease token is stale")
++            if row["lease_until"] is None or now_value >= float(row["lease_until"]):
++                raise LeaseError("lease has expired")
++            self.db.execute(
++                "UPDATE instances SET state=?, output_digest=?, success_token=?, "
++                "lease_token=NULL, lease_worker=NULL, lease_until=NULL, error=NULL "
++                "WHERE plan_id=? AND instance=?",
++                (SUCCESS, output_digest, lease_token, plan["plan_id"], instance),
++            )
++            _inject_fault(fault)
++            attempt = int(row["attempt"])
++        return {
++            "instance": instance,
++            "status": SUCCESS,
++            "attempt": attempt,
++            "output_digest": output_digest,
++        }
++
++    def fail(self, instance, lease_token, error, now, fault=None):
++        if not isinstance(instance, str) or not instance:
++            raise LeaseError("instance must be a non-empty string")
++        if not isinstance(lease_token, str) or not lease_token:
++            raise LeaseError("lease_token must be a non-empty string")
++        now_value = _number(now, "now")
++        if fault is not None and fault not in _FAULT_PHASES:
++            raise LeaseError(f"unknown fault phase: {fault}")
++        category = _error_text(error)
++
++        plan = self._ensure_active()
++        with self._tx():
++            row = self.db.execute(
++                "SELECT * FROM instances WHERE plan_id=? AND instance=?",
++                (plan["plan_id"], instance),
++            ).fetchone()
++            if row is None:
++                raise LeaseError(f"unknown instance: {instance}")
++            if row["state"] != RUNNING:
++                raise LeaseError(f"instance {instance} is not running")
++            if row["lease_token"] != lease_token:
++                raise LeaseError("lease token is stale")
++            if row["lease_until"] is None or now_value >= float(row["lease_until"]):
++                raise LeaseError("lease has expired")
++            attempt = int(row["attempt"])
++            maximum = self._max_attempts(plan).get(row["task"], 1)
++            state = FAILED if attempt >= maximum else PENDING
++            self.db.execute(
++                "UPDATE instances SET state=?, lease_token=NULL, "
++                "lease_worker=NULL, lease_until=NULL, error=? "
++                "WHERE plan_id=? AND instance=?",
++                (state, category, plan["plan_id"], instance),
++            )
++            if state == FAILED:
++                self._propagate(plan)
++            _inject_fault(fault)
++        return {
++            "instance": instance,
++            "status": state,
++            "attempt": attempt,
++            "error": category,
++        }
++
++    def status(self):
++        plan = self._ensure_active()
++        with self._tx(immediate=False):
++            rows = self.db.execute(
++                "SELECT instance, task, partition, state, attempt, "
++                "output_digest, error FROM instances "
++                "WHERE plan_id=? ORDER BY instance COLLATE BINARY",
++                (plan["plan_id"],),
++            ).fetchall()
++            maximums = self._max_attempts(plan)
++            counts = {state: 0 for state in STATES}
++            details = []
++            for row in rows:
++                state = row["state"]
++                counts[state] = counts.get(state, 0) + 1
++                details.append({
++                    "instance": row["instance"],
++                    "task": row["task"],
++                    "partition": row["partition"],
++                    "state": state,
++                    "status": state,
++                    "attempt": int(row["attempt"]),
++                    "max_attempts": maximums.get(row["task"]),
++                    "output_digest": row["output_digest"],
++                    "error": row["error"],
++                })
++        return {"counts": counts, "instances": details}
++
++
++def _task_of(instance: str, tasks: dict) -> str:
++    for name in sorted(tasks, key=len, reverse=True):
++        if instance.startswith(name + "@"):
++            return name
++    return instance.split("@", 1)[0]
++
++
++def _partition_of(instance: str, tasks: dict) -> str:
++    task = _task_of(instance, tasks)
++    return instance[len(task) + 1:]
++
++
++def _inject_fault(fault, phase=None):
++    if fault is None:
++        return
++    if fault not in _FAULT_PHASES:
++        raise LeaseError(f"unknown fault phase: {fault}")
++    if phase is None or fault == phase:
++        raise FaultInjected(f"fault injected: {fault}")
++
++
++__all__ = [
++    "Scheduler",
++    "SchedulerError",
++    "PlanError",
++    "LeaseError",
++    "FaultInjected",
++    "SchedulerFault",
++    "SCHEMA_VERSION",
++]
+*** End Patch

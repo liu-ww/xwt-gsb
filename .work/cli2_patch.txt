@@ -1,0 +1,31 @@
+*** Begin Patch
+*** Update File: backfillloom/__main__.py
+@@
+ def _read_json(value: str):
+     if value == "-":
+         return json.loads(sys.stdin.read())
++    stripped = value.lstrip()
++    if stripped.startswith("{") or stripped.startswith("["):
++        return json.loads(value)
+     path = Path(value)
+@@
+-    claim.add_argument("--lease-seconds", type=float, default=300.0)
++    claim.add_argument(
++        "--lease-seconds", "--lease_seconds", dest="lease_seconds",
++        type=float, default=300.0,
++    )
+@@
+-    complete.add_argument("--lease-token", required=True)
+-    complete.add_argument("--output-digest", required=True)
++    complete.add_argument(
++        "--lease-token", "--lease_token", dest="lease_token", required=True
++    )
++    complete.add_argument(
++        "--output-digest", "--output_digest", dest="output_digest", required=True
++    )
+@@
+-    fail.add_argument("--lease-token", required=True)
++    fail.add_argument(
++        "--lease-token", "--lease_token", dest="lease_token", required=True
++    )
+*** End Patch

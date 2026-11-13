@@ -1,0 +1,74 @@
+*** Begin Patch
+*** Update File: backfillloom/scheduler.py
+@@
+-    def _max_attempts(self, plan):
++    def _set_active(self, plan_id):
++        self.db.execute(
++            "INSERT INTO meta(key,value) VALUES('active_plan_id',?) "
++            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
++            (plan_id,),
++        )
++
++    def _ensure_active(self):
++        self._check()
++        if self.plan is not None:
++            return self.plan
++        with self._tx():
++            active = self.db.execute(
++                "SELECT value FROM meta WHERE key='active_plan_id'"
++            ).fetchone()
++            row = None
++            if active is not None:
++                row = self.db.execute(
++                    "SELECT * FROM plans WHERE plan_id=?", (active["value"],)
++                ).fetchone()
++            if row is None:
++                rows = self.db.execute("SELECT * FROM plans ORDER BY plan_id").fetchall()
++                if len(rows) == 1:
++                    row = rows[0]
++            if row is None:
++                if not self.db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]:
++                    raise PlanError("no plan loaded")
++                raise PlanError("multiple plans stored; call load(plan)")
++            self._activate(row)
++            self._set_active(row["plan_id"])
++        return self.plan
++
++    def _max_attempts(self, plan):
+@@
+     "SchedulerFault",
+     "SCHEMA_VERSION",
+ ]
+-
+-    def _set_active(self, plan_id):
+-        self.db.execute(
+-            "INSERT INTO meta(key,value) VALUES('active_plan_id',?) "
+-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+-            (plan_id,),
+-        )
+-
+-    def _ensure_active(self):
+-        self._check()
+-        if self.plan is not None:
+-            return self.plan
+-        with self._tx():
+-            active = self.db.execute(
+-                "SELECT value FROM meta WHERE key='active_plan_id'"
+-            ).fetchone()
+-            row = None
+-            if active is not None:
+-                row = self.db.execute(
+-                    "SELECT * FROM plans WHERE plan_id=?", (active["value"],)
+-                ).fetchone()
+-            if row is None:
+-                rows = self.db.execute("SELECT * FROM plans ORDER BY plan_id").fetchall()
+-                if len(rows) == 1:
+-                    row = rows[0]
+-            if row is None:
+-                if not self.db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]:
+-                    raise PlanError("no plan loaded")
+-                raise PlanError("multiple plans stored; call load(plan)")
+-            self._activate(row)
+-            self._set_active(row["plan_id"])
+-        return self.plan
+*** End Patch
