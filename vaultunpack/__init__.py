@@ -1,3 +1,3 @@
-from .extractor import Extractor
-__all__=['Extractor']
+from .extractor import ExtractionError, Extractor
 
+__all__ = ["Extractor"]
