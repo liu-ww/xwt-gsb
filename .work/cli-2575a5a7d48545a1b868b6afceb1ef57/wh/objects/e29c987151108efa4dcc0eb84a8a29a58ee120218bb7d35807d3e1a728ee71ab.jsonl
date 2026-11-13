@@ -1,0 +1,2 @@
+{"data":{"v":1},"op":"upsert","partition":"d=1","pk":"1","version":1}
+{"data":{"v":0},"op":"upsert","partition":"p","pk":"0","version":1}

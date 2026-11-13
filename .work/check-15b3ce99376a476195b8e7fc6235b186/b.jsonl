@@ -1,0 +1,4 @@
+{"data":{"v":33},"op":"upsert","partition":"d=1","pk":"2","version":3}
+{"data":{"v":2},"op":"upsert","partition":"d=1","pk":"1","version":2}
+{"data":{"v":1},"op":"delete","partition":"d=2","pk":"9","version":1}
+{"data":{"v":2},"op":"upsert","partition":"d=2","pk":"3","version":2}

@@ -1,0 +1,3 @@
+{"data":{"x":1},"op":"upsert","partition":"p","pk":"1","version":1}
+{"data":{"x":2},"op":"upsert","partition":"p","pk":"2","version":1}
+{"data":{"x":3},"op":"upsert","partition":"p","pk":"3","version":1}
